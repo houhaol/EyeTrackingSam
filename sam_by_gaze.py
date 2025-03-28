@@ -26,7 +26,8 @@ def run_sam_by_gaze_or_fixation(frame_dir, checkpoint_path, output_mask_dir, out
     os.makedirs(output_overlay_dir, exist_ok=True)
 
     # Load SAM model
-    sam = sam_model_registry["vit_b"](checkpoint=checkpoint_path)
+    model_type = "_".join(os.path.basename(checkpoint_path).split('_')[1:3])
+    sam = sam_model_registry[model_type](checkpoint=checkpoint_path)
     predictor = SamPredictor(sam)
 
     # Load gaze or fixation data

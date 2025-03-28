@@ -1,0 +1,15 @@
+a person
+a face
+a phone
+a backpack
+a street sign
+a crosswalk
+a staircase
+a building
+a car
+a bus
+a motorcycle
+a sidewalk
+a door
+a traffic light
+a shop sign
