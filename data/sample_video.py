@@ -3,7 +3,7 @@ import numpy as np
 import os
 import argparse
 
-def sample_frames(video_path, timestamps_path, output_dir, test_mode=False):
+def sample_frames(video_path, timestamps_path, output_dir, test_mode=False, start_time=None, end_time=None):
     os.makedirs(output_dir, exist_ok=True)
 
     timestamps_ns = np.load(timestamps_path)
@@ -13,6 +13,12 @@ def sample_frames(video_path, timestamps_path, output_dir, test_mode=False):
     # Use the first timestamp as the video start time
     start_timestamp_ns = timestamps_ns[0]
     relative_timestamps_s = (timestamps_ns - start_timestamp_ns) / 1e9
+
+    # Filter by start and end time if provided
+    if start_time is not None and end_time is not None:
+        mask = (relative_timestamps_s >= start_time) & (relative_timestamps_s <= end_time)
+        timestamps_ns = timestamps_ns[mask]
+        relative_timestamps_s = relative_timestamps_s[mask]
 
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -45,6 +51,8 @@ if __name__ == "__main__":
     parser.add_argument("--timestamps", required=True, help="Path to world_timestamps_unix.npy (nanoseconds)")
     parser.add_argument("--output", default="sampled_frames", help="Directory to save sampled frames")
     parser.add_argument("--test", action="store_true", help="Only sample the first 10 timestamps for testing")
+    parser.add_argument("--start", type=float, help="Start time in seconds from beginning of video")
+    parser.add_argument("--end", type=float, help="End time in seconds from beginning of video")
     args = parser.parse_args()
 
-    sample_frames(args.video, args.timestamps, args.output, args.test)
+    sample_frames(args.video, args.timestamps, args.output, args.test, args.start, args.end)

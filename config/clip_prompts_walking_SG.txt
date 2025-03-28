@@ -1,0 +1,79 @@
+a person
+a face
+a group of people
+a cyclist
+a pedestrian
+a commuter
+a child
+a man
+a woman
+
+a traffic light
+a crosswalk
+a zebra crossing
+a road sign
+a street sign
+a bus stop sign
+a taxi stand sign
+a sheltered walkway
+a public map display
+a building entrance
+a staircase
+an escalator
+a lift
+a curb
+a sidewalk
+a railing
+a bollard
+a safety cone
+
+a car
+a bus
+a taxi
+an SMRT train
+a Grab car
+a van
+a motorcycle
+a delivery scooter
+a parked bicycle
+
+a phone
+a smartphone
+a smartwatch
+a handbag
+a backpack
+a shopping bag
+a water bottle
+a wallet
+a drink can
+a food container
+a takeaway cup
+an umbrella
+a tissue packet
+
+a hawker stall
+a hawker stall sign
+a food menu board
+a vending machine
+a supermarket sign
+a convenience store sign
+a shopping mall entrance
+a 7-Eleven sign
+
+a bench
+a trash bin
+a recycling bin
+a street lamp
+a covered walkway pole
+a public notice board
+a bus stop shelter
+a taxi queue pole
+
+a tree
+a bush
+a potted plant
+a flower bed
+a grass patch
+a park sign
+a park bench
+a water fountain

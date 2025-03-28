@@ -5,8 +5,8 @@ import argparse
 import torch
 import clip
 import numpy as np
+import json
 from PIL import Image
-
 
 def extract_timestamp_ns(filename):
     match = re.search(r"frames_(\d+)\.png", filename)
@@ -23,7 +23,7 @@ def load_prompts_from_file(prompt_file):
     with open(prompt_file, 'r') as f:
         return [line.strip() for line in f if line.strip()]
 
-def run_clip_labeling(frame_dir, mask_dir, overlay_dir, output_dir, prompt_list):
+def run_clip_labeling(frame_dir, mask_dir, overlay_dir, output_dir, prompt_list, json_output):
     os.makedirs(output_dir, exist_ok=True)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -34,6 +34,8 @@ def run_clip_labeling(frame_dir, mask_dir, overlay_dir, output_dir, prompt_list)
     with torch.no_grad():
         text_features = model.encode_text(text_tokens)
         text_features /= text_features.norm(dim=-1, keepdim=True)
+
+    results = []
 
     for fname in os.listdir(mask_dir):
         if not fname.startswith("mask_") or not fname.endswith(".png"):
@@ -82,7 +84,19 @@ def run_clip_labeling(frame_dir, mask_dir, overlay_dir, output_dir, prompt_list)
         cv2.imwrite(output_path, annotated)
         print(f"✅ Labeled {timestamp}: {pred_label}")
 
+        # Save result to list for JSON
+        results.append({
+            "timestamp_ns": timestamp,
+            "label": pred_label,
+            "bbox": [int(x_min), int(y_min), int(x_max), int(y_max)]
+        })
+
     print("🎉 CLIP-based label classification complete.")
+
+    if json_output:
+        with open(json_output, 'w') as f:
+            json.dump(results, f, indent=2)
+        print(f"📄 Results saved to: {json_output}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Label SAM-segmented objects using CLIP and candidate prompts.")
@@ -91,6 +105,7 @@ if __name__ == "__main__":
     parser.add_argument("--overlays", required=True, help="Directory of SAM overlay images (overlay_<timestamp>.png)")
     parser.add_argument("--output", default="clip_labeled_overlays", help="Directory to save labeled overlay images")
     parser.add_argument("--prompt_file", required=True, help="Path to text file containing one prompt per line")
+    parser.add_argument("--json_output", default="clip_results.json", help="Path to save results as JSON")
 
     args = parser.parse_args()
     prompts = load_prompts_from_file(args.prompt_file)
@@ -100,5 +115,6 @@ if __name__ == "__main__":
         mask_dir=args.masks,
         overlay_dir=args.overlays,
         output_dir=args.output,
-        prompt_list=prompts
+        prompt_list=prompts,
+        json_output=args.json_output
     )

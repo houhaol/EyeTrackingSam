@@ -4,22 +4,12 @@ import os
 import cv2
 import re
 import argparse
+import torch
 from segment_anything import sam_model_registry, SamPredictor
 
 def extract_timestamp_ns(filename):
     match = re.search(r"frames_(\d+)\.png", filename)
     return int(match.group(1)) if match else None
-
-def find_closest_gaze_point(timestamp_ns, gaze_df):
-    gaze_df["abs_diff"] = np.abs(gaze_df["timestamp_ns"] - timestamp_ns)
-    return gaze_df.loc[gaze_df["abs_diff"].idxmin()]
-
-def find_fixation_for_frame(timestamp_ns, fixation_df):
-    match = fixation_df[
-        (fixation_df["start timestamp [ns]"] <= timestamp_ns) &
-        (fixation_df["end timestamp [ns]"] >= timestamp_ns)
-    ]
-    return match.iloc[0] if not match.empty else None
 
 def run_sam_by_gaze_or_fixation(frame_dir, checkpoint_path, output_mask_dir, output_overlay_dir, gaze_path=None, fixation_path=None):
     os.makedirs(output_mask_dir, exist_ok=True)
@@ -28,6 +18,8 @@ def run_sam_by_gaze_or_fixation(frame_dir, checkpoint_path, output_mask_dir, out
     # Load SAM model
     model_type = "_".join(os.path.basename(checkpoint_path).split('_')[1:3])
     sam = sam_model_registry[model_type](checkpoint=checkpoint_path)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    sam.to(device)
     predictor = SamPredictor(sam)
 
     # Load gaze or fixation data
@@ -44,27 +36,43 @@ def run_sam_by_gaze_or_fixation(frame_dir, checkpoint_path, output_mask_dir, out
         fixation_df["start timestamp [ns]"] = fixation_df["start timestamp [ns]"].astype(np.int64)
         fixation_df["end timestamp [ns]"] = fixation_df["end timestamp [ns]"].astype(np.int64)
 
-    # List frames
-    frame_filenames = sorted([
+    # List and filter frames
+    all_frame_filenames = sorted([
         fname for fname in os.listdir(frame_dir)
         if re.match(r"frames_\d+\.png", fname)
     ])
+
+    if fixation_df is not None:
+        # Collect frames within any fixation interval
+        filtered_frames = []
+        for fname in all_frame_filenames:
+            ts_ns = extract_timestamp_ns(fname)
+            in_any_fixation = ((fixation_df["start timestamp [ns]"] <= ts_ns) & (fixation_df["end timestamp [ns]"] >= ts_ns)).any()
+            if in_any_fixation:
+                filtered_frames.append(fname)
+        frame_filenames = filtered_frames
+    else:
+        frame_filenames = all_frame_filenames
 
     for fname in frame_filenames:
         timestamp_ns = extract_timestamp_ns(fname)
         if timestamp_ns is None:
             continue
 
-        # Determine prompt point (x, y)
         prompt_source = None
         if fixation_df is not None:
-            fixation = find_fixation_for_frame(timestamp_ns, fixation_df)
-            if fixation is not None:
+            fixation = fixation_df[
+                (fixation_df["start timestamp [ns]"] <= timestamp_ns) &
+                (fixation_df["end timestamp [ns]"] >= timestamp_ns)
+            ]
+            if not fixation.empty:
+                fixation = fixation.iloc[0]
                 x = fixation["fixation x [px]"]
                 y = fixation["fixation y [px]"]
                 prompt_source = f"fixation ID {fixation['id']}"
         if gaze_df is not None and prompt_source is None:
-            gaze = find_closest_gaze_point(timestamp_ns, gaze_df)
+            gaze_df["abs_diff"] = np.abs(gaze_df["timestamp_ns"] - timestamp_ns)
+            gaze = gaze_df.loc[gaze_df["abs_diff"].idxmin()]
             x = gaze["gaze x [px]"]
             y = gaze["gaze y [px]"]
             prompt_source = "gaze"

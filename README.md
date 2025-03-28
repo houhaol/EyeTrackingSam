@@ -1,7 +1,7 @@
 # setup
 Install segment anything \ 
 Run data/sample_video.py to obtain frames according to world timestamps.
-`python sample_video.py --video path/to/video --timestamps path/to/world_timestamps_unix.npy --output ./frames_test --test`
+`python sample_video.py --video path/to/input.mp4 --timestamps path/to/world_timestamps_unix.npy --output path/to/output_dir --start 360 --end 660`
 
 Test mode in `sample_video.py` enables sample first 10 frames for debug purpose \
 
@@ -40,5 +40,18 @@ python clip_segment_classifier.py \
   --masks output/output_masks \
   --overlays output/output_overlays \
   --output output/clip_labeled_overlays \
-  --prompt_file config/clip_prompts_walking.txt
+  --prompt_file config/clip_prompts_walking.txt \
+  --json_output clip_results.json
+```
+
+# CLIP prompts generation
+Category: People & Mobility, Navigation & Urban Elements, Vehicles & Public Transport, Everyday Interaction, Public Furniture & Facilities, Green Spaces
+
+# Output
+Run data/merge_frames.py to merge frames to a video for demo.
+```
+python merge_frames.py \
+  --frames clip_labeled_overlays \
+  --output labeled_video.mp4 \
+  --fps 30
 ```
