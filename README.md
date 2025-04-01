@@ -41,7 +41,8 @@ python clip_segment_classifier.py \
   --overlays output/output_overlays \
   --output output/clip_labeled_overlays \
   --prompt_file config/clip_prompts_walking.txt \
-  --json_output clip_results.json
+  --json_output clip_results.json \
+  --fixation /home/houhao/workspace/VINS-Mono/dataset/Pilot2/fixations.csv
 ```
 
 # CLIP prompts generation
