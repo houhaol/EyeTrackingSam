@@ -42,7 +42,7 @@ def run_clip_labeling(frame_dir, mask_dir, overlay_dir, output_dir, prompt_list,
     os.makedirs(output_dir, exist_ok=True)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model, preprocess = clip.load("ViT-B/32", device=device)
+    model, preprocess = clip.load("ViT-L/14", device=device)
 
     text_tokens = clip.tokenize(prompt_list).to(device)
     with torch.no_grad():
