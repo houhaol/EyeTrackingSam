@@ -1,14 +1,14 @@
 import os
 import re
 import cv2
-import argparse
+import json
 import torch
 import open_clip
 import numpy as np
-import json
 import pandas as pd
 from PIL import Image
 from collections import defaultdict, Counter
+import tqdm
 
 def extract_timestamp_ns(filename):
     match = re.search(r"frames_(\d+)\.png", filename)
@@ -19,25 +19,17 @@ def get_mask_bbox(mask_img):
     if green_mask.sum() == 0:
         return None, None
     y_idx, x_idx = np.where(green_mask)
-    return green_mask, (x_idx.min(), y_idx.min(), x_max := x_idx.max(), y_max := y_idx.max())
+    return green_mask, (x_idx.min(), y_idx.min(), x_idx.max(), y_idx.max())
 
 def expand_bbox(bbox, img_shape, margin=20, size_threshold=300):
-    """Expand bounding box by margin unless the bbox is already large."""
     x_min, y_min, x_max, y_max = bbox
     h, w = img_shape[:2]
-
-    box_width = x_max - x_min
-    box_height = y_max - y_min
-
-    if box_width > size_threshold or box_height > size_threshold:
-        return x_min, y_min, x_max, y_max 
-
-    x_min = max(0, x_min - margin)
-    y_min = max(0, y_min - margin)
-    x_max = min(w - 1, x_max + margin)
-    y_max = min(h - 1, y_max + margin)
-    return x_min, y_min, x_max, y_max
-
+    if (x_max - x_min > size_threshold) or (y_max - y_min > size_threshold):
+        return x_min, y_min, x_max, y_max
+    return (
+        max(0, x_min - margin), max(0, y_min - margin),
+        min(w - 1, x_max + margin), min(h - 1, y_max + margin)
+    )
 
 def load_prompts_from_file(prompt_file):
     with open(prompt_file, 'r') as f:
@@ -50,177 +42,191 @@ def load_fixation_mapping(fixation_path):
     return df
 
 def find_fixation_id_for_timestamp(ts, fixation_df):
-    match = fixation_df[
-        (fixation_df["start timestamp [ns]"] <= int(ts)) &
-        (fixation_df["end timestamp [ns]"] >= int(ts))
-    ]
+    match = fixation_df[(fixation_df["start timestamp [ns]"] <= int(ts)) &
+                        (fixation_df["end timestamp [ns]"] >= int(ts))]
     return int(match.iloc[0]["id"]) if not match.empty else None
 
-def run_clip_labeling(frame_dir, mask_dir, overlay_dir, output_dir, prompt_list, json_output, fixation_path=None, confidence_thr=0.6):
-    os.makedirs(output_dir, exist_ok=True)
+class CLIPLabeler:
+    def __init__(self, frame_dir, mask_dir, overlay_dir, output_dir,
+                 prompt_list, json_output, fixation_path=None,
+                 confidence_thr=0.6, visualize=True, vote_fixation=True,
+                 merge_video=False):
+        self.frame_dir = frame_dir
+        self.mask_dir = mask_dir
+        self.overlay_dir = overlay_dir
+        self.output_dir = output_dir
+        self.prompt_list = prompt_list
+        self.json_output = json_output
+        self.fixation_path = fixation_path
+        self.confidence_thr = confidence_thr
+        self.visualize = visualize
+        self.vote_fixation = vote_fixation
+        self.merge_video = merge_video
+        os.makedirs(output_dir, exist_ok=True)
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    model, _, preprocess = open_clip.create_model_and_transforms("ViT-H-14-quickgelu", pretrained="dfn5b", device=device)
-    tokenizer = open_clip.get_tokenizer("ViT-H-14-quickgelu")
-    text_tokens = tokenizer(prompt_list).to(device)
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.model, _, self.preprocess = open_clip.create_model_and_transforms(
+            "ViT-H-14-quickgelu", pretrained="dfn5b", device=self.device)
+        self.tokenizer = open_clip.get_tokenizer("ViT-H-14-quickgelu")
+        self.text_features = self._encode_text(prompt_list)
 
-    with torch.no_grad():
-        text_features = model.encode_text(text_tokens)
-        text_features /= text_features.norm(dim=-1, keepdim=True)
+        self.fixation_df = load_fixation_mapping(fixation_path) if fixation_path else None
+        self.fixation_predictions = defaultdict(list)
+        self.frame_level_results = []
+        self.video_frames = []
 
-    fixation_df = load_fixation_mapping(fixation_path) if fixation_path else None
-    fixation_predictions = defaultdict(list)
-    frame_level_results = []
-
-    for fname in os.listdir(mask_dir):
-        if not fname.startswith("mask_") or not fname.endswith(".png"):
-            continue
-
-        timestamp = fname.replace("mask_", "").replace(".png", "")
-        frame_path = os.path.join(frame_dir, f"frames_{timestamp}.png")
-        mask_path = os.path.join(mask_dir, fname)
-        overlay_path = os.path.join(overlay_dir, f"overlay_{timestamp}.png")
-
-        if not (os.path.exists(frame_path) and os.path.exists(mask_path) and os.path.exists(overlay_path)):
-            print(f"Skipping {timestamp} — missing required files")
-            continue
-
-        frame = cv2.imread(frame_path)
-        mask_img = cv2.imread(mask_path)
-        overlay_img = cv2.imread(overlay_path)
-
-        green_mask, bbox = get_mask_bbox(mask_img)
-        if bbox is None:
-            print(f"No valid mask in {fname}")
-            continue
-
-        # x_min, y_min, x_max, y_max = bbox
-        # cropped = frame[y_min:y_max+1, x_min:x_max+1]
-        # pil_img = Image.fromarray(cv2.cvtColor(cropped, cv2.COLOR_BGR2RGB))
-        # Expand bounding box for better context
-        x_min, y_min, x_max, y_max = expand_bbox(bbox, frame.shape, margin=20)
-        masked = frame.copy()
-        masked[~green_mask] = 0
-        cropped = masked[y_min:y_max+1, x_min:x_max+1]
-        pil_img = Image.fromarray(cv2.cvtColor(cropped, cv2.COLOR_BGR2RGB))
-
-
-        image_input = preprocess(pil_img).unsqueeze(0).to(device)
-
+    def _encode_text(self, prompt_list):
+        tokens = self.tokenizer(prompt_list).to(self.device)
         with torch.no_grad():
-            image_features = model.encode_image(image_input)
-            image_features /= image_features.norm(dim=-1, keepdim=True)
-            similarity = (100.0 * image_features @ text_features.T).softmax(dim=-1)
-            pred_id = similarity.argmax().item()
-            pred_label = prompt_list[pred_id]
+            features = self.model.encode_text(tokens)
+            return features / features.norm(dim=-1, keepdim=True)
 
-        # Compute confidence score for top label
-        top_confidence = float(similarity[0, pred_id].item())
-
-        # Save frame-level result
-        result = {
-            "timestamp_ns": timestamp,
-            "label": pred_label,
-            "confidence": round(top_confidence, 4),
-            "bbox": [int(x_min), int(y_min), int(x_max), int(y_max)]
-        }
-        frame_level_results.append(result)
-
-        # Group by fixation if available
-        if fixation_df is not None:
-            fixation_id = find_fixation_id_for_timestamp(timestamp, fixation_df)
-            if fixation_id is not None:
-                fixation_predictions[fixation_id].append(pred_label)
-
-        # Save annotated overlay
-        annotated = overlay_img.copy()
-        # if top_confidence >= confidence_thr:
-        #     label_text = f"{pred_label} ({top_confidence:.2f})"
-        #     cv2.rectangle(annotated, (x_min, y_min), (x_max, y_max), (255, 255, 0), 2)
-        #     cv2.putText(
-        #         annotated, label_text, (x_min, y_min - 10),
-        #         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2, cv2.LINE_AA
-        #     )
-        #     output_path = os.path.join(output_dir, f"clip_labeled_{timestamp}.png")
-        #     cv2.imwrite(output_path, annotated)
-        #     print(f"Annotated image saved to: {output_path}")
-        # else:
-        #     output_path = os.path.join(output_dir, f"clip_labeled_{timestamp}.png")
-        #     cv2.imwrite(output_path, frame)
-        #     print(f"Low confidence ({top_confidence:.2f}) — saving raw without overlay and label.")
-        
-
-    print('Fixation-level voting results with top-2 fallback and visual overlay')
-    if fixation_df is not None:
-        voted_results = []
-        for _, row in fixation_df.iterrows():
-            fixation_id = int(row["id"])
-            start_ts = int(row["start timestamp [ns]"])
-            end_ts = int(row["end timestamp [ns]"])
-            labels = fixation_predictions.get(fixation_id, [])
-
-            if not labels:
+    def run(self):
+        for fname in tqdm.tqdm(sorted(os.listdir(self.mask_dir))):
+            if not fname.startswith("mask_") or not fname.endswith(".png"):
                 continue
 
+            timestamp = fname.replace("mask_", "").replace(".png", "")
+            frame_path = os.path.join(self.frame_dir, f"frames_{timestamp}.png")
+            mask_path = os.path.join(self.mask_dir, fname)
+            overlay_path = os.path.join(self.overlay_dir, f"overlay_{timestamp}.png")
+
+            if not (os.path.exists(frame_path) and os.path.exists(mask_path) and os.path.exists(overlay_path)):
+                print(f"Skipping {timestamp} — missing required files")
+                continue
+
+            frame = cv2.imread(frame_path)
+            mask_img = cv2.imread(mask_path)
+            overlay_img = cv2.imread(overlay_path)
+
+            green_mask, bbox = get_mask_bbox(mask_img)
+            if bbox is None:
+                print(f"No valid mask in {fname}")
+                continue
+
+            x_min, y_min, x_max, y_max = expand_bbox(bbox, frame.shape)
+            masked = frame.copy()
+            masked[~green_mask] = 0
+            cropped = masked[y_min:y_max+1, x_min:x_max+1]
+            pil_img = Image.fromarray(cv2.cvtColor(cropped, cv2.COLOR_BGR2RGB))
+            image_input = self.preprocess(pil_img).unsqueeze(0).to(self.device)
+
+            with torch.no_grad():
+                image_features = self.model.encode_image(image_input)
+                image_features /= image_features.norm(dim=-1, keepdim=True)
+                similarity = (100.0 * image_features @ self.text_features.T).softmax(dim=-1)
+                pred_id = similarity.argmax().item()
+                pred_label = self.prompt_list[pred_id]
+                confidence = float(similarity[0, pred_id].item())
+
+            self.frame_level_results.append({
+                "timestamp_ns": timestamp,
+                "label": pred_label,
+                "confidence": round(confidence, 4),
+                "bbox": [int(x_min), int(y_min), int(x_max), int(y_max)]
+            })
+
+            if self.fixation_df is not None:
+                fixation_id = find_fixation_id_for_timestamp(timestamp, self.fixation_df)
+                if fixation_id is not None:
+                    self.fixation_predictions[fixation_id].append(pred_label)
+
+            if self.visualize:
+                annotated = self._annotate_image(confidence, pred_label, overlay_img, frame, x_min, y_min, x_max, y_max)
+                if self.merge_video:
+                    self.video_frames.append(annotated)
+                else:
+                    out_path = os.path.join(self.output_dir, f"clip_labeled_{timestamp}.png")
+                    cv2.imwrite(out_path, annotated)
+
+        if self.json_output:
+            with open(self.json_output, 'w') as f:
+                json.dump(self.frame_level_results, f, indent=2)
+            print(f"📄 Frame-level results saved to: {self.json_output}")
+
+        if self.fixation_df is not None and self.vote_fixation:
+            self._vote_fixation()
+
+        if self.visualize and self.merge_video and self.video_frames:
+            out_video_path = os.path.join(self.output_dir, "clip_labeled_video.mp4")
+            height, width, _ = self.video_frames[0].shape
+            out = cv2.VideoWriter(out_video_path, cv2.VideoWriter_fourcc(*"mp4v"), 10, (width, height))
+            for frame in self.video_frames:
+                out.write(frame)
+            out.release()
+            print(f"📽️ Merged video saved to: {out_video_path}")
+
+    def _annotate_image(self, confidence, pred_label, overlay_img, raw_img, x_min, y_min, x_max, y_max):
+        annotated = overlay_img.copy()
+        if confidence >= self.confidence_thr:
+            label_text = f"{pred_label} ({confidence:.2f})"
+            cv2.rectangle(annotated, (x_min, y_min), (x_max, y_max), (255, 255, 0), 2)
+            cv2.putText(annotated, label_text, (x_min, y_min - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2, cv2.LINE_AA)
+        else:
+            annotated = raw_img.copy()
+        return annotated
+
+    def _vote_fixation(self):
+        voted_results = []
+        for i in range(len(self.frame_level_results)):
+            window = self.frame_level_results[max(0, i - 2):i + 3]  # sliding window of size 5
+            labels = [r["label"] for r in window]
             vote_counter = Counter(labels)
             most_common = vote_counter.most_common()
-            top_label = most_common[0][0]
-
-            # Tie fallback to second-most
+            top_label = most_common[0][0] if most_common else None
             if len(most_common) > 1 and most_common[0][1] == most_common[1][1]:
                 top_label = most_common[1][0]
 
+            result = self.frame_level_results[i]
+            result_ts = result["timestamp_ns"]
+            result_bbox = result["bbox"]
+
             voted_results.append({
-                "fixation_id": fixation_id,
-                "start_timestamp_ns": start_ts,
-                "end_timestamp_ns": end_ts,
+                "timestamp_ns": result_ts,
                 "label": top_label,
                 "votes": dict(vote_counter)
             })
 
-            # Annotate all frames in fixation
-            for r in frame_level_results:
-                ts = int(r["timestamp_ns"])
-                if start_ts <= ts <= end_ts:
-                    overlay_path = os.path.join(overlay_dir, f"overlay_{r['timestamp_ns']}.png")
-                    if os.path.exists(overlay_path):
-                        overlay_img = cv2.imread(overlay_path)
-                        x_min, y_min, x_max, y_max = r["bbox"]
-                        annotated = overlay_img.copy()
-                        label_text = f"{top_label} (fixation {fixation_id}, {r.get('confidence', 0.0):.2f})"
-                        cv2.rectangle(annotated, (x_min, y_min), (x_max, y_max), (0, 255, 255), 2)
-                        cv2.putText(
-                            annotated, label_text, (x_min, y_min - 10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2, cv2.LINE_AA
-                        )
-                        out_path = os.path.join(output_dir, f"fixation_labeled_{fixation_id}_{r['timestamp_ns']}.png")
+            if self.visualize:
+                overlay_path = os.path.join(self.overlay_dir, f"overlay_{result_ts}.png")
+                if os.path.exists(overlay_path):
+                    overlay_img = cv2.imread(overlay_path)
+                    x_min, y_min, x_max, y_max = result_bbox
+                    annotated = overlay_img.copy()
+                    label_text = f"{top_label} (windowed)"
+                    cv2.rectangle(annotated, (x_min, y_min), (x_max, y_max), (0, 165, 255), 2)
+                    cv2.putText(annotated, label_text, (x_min, y_min - 10),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 165, 255), 2, cv2.LINE_AA)
+                    if self.merge_video:
+                        self.video_frames.append(annotated)
+                    else:
+                        out_path = os.path.join(self.output_dir, f"voted_labeled_{result_ts}.png")
                         cv2.imwrite(out_path, annotated)
 
-        fixation_json = json_output.replace(".json", "_fixation_voted.json")
+        fixation_json = self.json_output.replace(".json", "_fixation_voted.json")
         with open(fixation_json, 'w') as f:
             json.dump(voted_results, f, indent=2)
         print(f"📄 Fixation-voted results saved to: {fixation_json}")
 
-    if json_output:
-        with open(json_output, 'w') as f:
-            json.dump(frame_level_results, f, indent=2)
-        print(f"📄 Frame-level results saved to: {json_output}")
-
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Label SAM-segmented objects using CLIP and candidate prompts.")
-    parser.add_argument("--frames", required=True, help="Directory of original frames (frames_<timestamp>.png)")
-    parser.add_argument("--masks", required=True, help="Directory of SAM mask images (mask_<timestamp>.png)")
-    parser.add_argument("--overlays", required=True, help="Directory of SAM overlay images (overlay_<timestamp>.png)")
-    parser.add_argument("--output", default="clip_labeled_overlays", help="Directory to save labeled overlay images")
-    parser.add_argument("--prompt_file", required=True, help="Path to text file containing one prompt per line")
-    parser.add_argument("--json_output", default="clip_results.json", help="Path to save results as JSON")
-    parser.add_argument("--fixation", help="Optional: path to fixation.csv for voting")
-    parser.add_argument("--confidence_thr", type=float, default=0.6, help="Confidence threshold for CLIP predictions")
-
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--frames", required=True)
+    parser.add_argument("--masks", required=True)
+    parser.add_argument("--overlays", required=True)
+    parser.add_argument("--output", default="clip_labeled_overlays")
+    parser.add_argument("--prompt_file", required=True)
+    parser.add_argument("--json_output", default="clip_results.json")
+    parser.add_argument("--fixation", help="Optional: path to fixation.csv")
+    parser.add_argument("--confidence_thr", type=float, default=0.6)
+    parser.add_argument("--visualize", action="store_true")
+    parser.add_argument("--vote_fixation", action="store_true")
+    parser.add_argument("--merge_video", action="store_true", help="Merge output frames into a single video")
     args = parser.parse_args()
-    prompts = load_prompts_from_file(args.prompt_file)
 
-    run_clip_labeling(
+    prompts = load_prompts_from_file(args.prompt_file)
+    labeler = CLIPLabeler(
         frame_dir=args.frames,
         mask_dir=args.masks,
         overlay_dir=args.overlays,
@@ -228,5 +234,9 @@ if __name__ == "__main__":
         prompt_list=prompts,
         json_output=args.json_output,
         fixation_path=args.fixation,
-        confidence_thr=args.confidence_thr
+        confidence_thr=args.confidence_thr,
+        visualize=args.visualize,
+        vote_fixation=args.vote_fixation,
+        merge_video=args.merge_video
     )
+    labeler.run()
