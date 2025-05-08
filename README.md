@@ -102,3 +102,8 @@ python diff_img_create.py \
      --mask_dir /path/to/masks \
      --output_dir /path/to/output_diff
 ```
+
+# Behaviors recognition from eye goggles data
+```
+python behaviors_gaze.py --video pilot2/world.mp4 --gaze pilot2/gaze.csv --imu pilot2/imu.csv --timestamps pilot2/world_timestamps_unix.npy --output pilot/overlay.mp4 --info pilot2/info.json --export_csv pilot2/gaze_imu_behaviors.csv
+```
