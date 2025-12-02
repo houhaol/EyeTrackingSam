@@ -1,15 +1,7 @@
 a person
-a face
-a phone
-a backpack
-a street sign
-a crosswalk
-a staircase
+a greenery
+a signage
+a step
 a building
-a car
-a bus
-a motorcycle
-a sidewalk
-a door
-a traffic light
-a shop sign
+a vehicle
+a ground
