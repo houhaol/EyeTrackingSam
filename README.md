@@ -72,3 +72,6 @@ python 05sky_greenary_ratio.py --semantic_h5 /home/houhao/workspace/EyeTrackingS
 ```
 python behaviors_gaze.py --video pilot2/world.mp4 --gaze pilot2/gaze.csv --imu pilot2/imu.csv --timestamps pilot2/world_timestamps_unix.npy --output pilot/overlay.mp4 --info pilot2/info.json --export_csv pilot2/gaze_imu_behaviors.csv
 ```
+
+## Viz tool
+Check out this repo [Link](https://github.com/houhaol/gps-alpha-lab.git). The developed tool is under viz_tool using dash.
